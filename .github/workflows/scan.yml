@@ -1,5 +1,7 @@
 name: parallel-scan
 on:
+  push:
+    branches: [scan]
   workflow_dispatch:
     inputs:
       range_start:
@@ -30,8 +32,8 @@ jobs:
         run: |
           python3 - <<'PYEOF'
           import json, os
-          L = int('${{ inputs.range_start }}'); R = int('${{ inputs.range_end }}')
-          cs = int('${{ inputs.chunk_size }}'); mc = int('${{ inputs.max_chunks }}')
+          L = int('${{ inputs.range_start || '1011128158584751' }}'); R = int('${{ inputs.range_end || '10098097238186292' }}')
+          cs = int('${{ inputs.chunk_size || '2000000000000' }}'); mc = int('${{ inputs.max_chunks || '24' }}')
           total = R - L + 1
           n = min(mc, (total + cs - 1)//cs)
           chunks = []
