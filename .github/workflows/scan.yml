@@ -32,8 +32,16 @@ jobs:
         run: |
           python3 - <<'PYEOF'
           import json, os
-          L = int('${{ inputs.range_start || '1011128158584751' }}'); R = int('${{ inputs.range_end || '10098097238186292' }}')
-          cs = int('${{ inputs.chunk_size || '2000000000000' }}'); mc = int('${{ inputs.max_chunks || '24' }}')
+          cfg = {}
+          try:
+              with open('scan_config.json') as fh: cfg = json.load(fh)
+              print("using scan_config.json:", cfg)
+          except Exception:
+              print("no scan_config.json, using inputs/defaults")
+          L = int(cfg.get('range_start', '${{ inputs.range_start || '1011128158584751' }}'))
+          R = int(cfg.get('range_end', '${{ inputs.range_end || '10098097238186292' }}'))
+          cs = int(cfg.get('chunk_size', '${{ inputs.chunk_size || '2000000000000' }}'))
+          mc = int(cfg.get('max_chunks', '${{ inputs.max_chunks || '24' }}'))
           total = R - L + 1
           n = min(mc, (total + cs - 1)//cs)
           chunks = []
@@ -96,29 +104,36 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Aggregate
+      - name: Aggregate and commit
         run: |
-          mkdir -p results
-          : > results/summary.txt
+          set -e
+          TS=$(date -u +%Y%m%dT%H%M%SZ)
+          mkdir -p /tmp/rs/$TS
+          : > /tmp/rs/$TS/summary.txt
           sols=0
           for f in artifacts/chunk-*/chunk_*.txt; do
             cid=$(basename "$f" .txt)
             if grep -q "FOUND N" "$f"; then
-              echo "$cid: SOLUTION -> $(grep 'FOUND N' "$f" | head -1)" >> results/summary.txt
+              echo "$cid: SOLUTION -> $(grep 'FOUND N' "$f" | head -1)" >> /tmp/rs/$TS/summary.txt
               sols=1
             elif grep -q "NO SOLUTION" "$f"; then
-              echo "$cid: no-solution" >> results/summary.txt
+              echo "$cid: no-solution" >> /tmp/rs/$TS/summary.txt
             else
-              echo "$cid: TIMEOUT/partial" >> results/summary.txt
+              echo "$cid: TIMEOUT/partial" >> /tmp/rs/$TS/summary.txt
             fi
           done
-          echo "ANY_SOLUTION=$sols" >> results/summary.txt
-          cat results/summary.txt
-      - name: Commit results
-        run: |
+          echo "ANY_SOLUTION=$sols" >> /tmp/rs/$TS/summary.txt
+          echo "=== run $TS ==="; cat /tmp/rs/$TS/summary.txt
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git checkout -B results || true
-          git add results/summary.txt
-          git -c user.name="github-actions" -c user.email="actions@github.com" commit -m "scan results $(date -u +%Y%m%dT%H%M%SZ)" || echo "no changes"
+          git fetch origin results || true
+          if git rev-parse --verify origin/results >/dev/null 2>&1; then
+            git checkout -B results origin/results
+          else
+            git checkout -B results
+          fi
+          mkdir -p results
+          cp -r /tmp/rs/* results/
+          git add results/
+          git -c user.name="github-actions" -c user.email="actions@github.com" commit -m "scan results $TS" || echo "no changes"
           git push -f origin results
