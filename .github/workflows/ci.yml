@@ -1,0 +1,16 @@
+name: ci-build
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile
+        run: g++ -O3 -march=native -funroll-loops -pthread -o scan_range scan_range.cpp
+      - name: Smoke test (tiny range)
+        run: |
+          ./scan_range 1011128158584751 1011128168584751 20000000 2>&1 | tail -3

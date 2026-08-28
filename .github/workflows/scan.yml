@@ -1,0 +1,122 @@
+name: parallel-scan
+on:
+  workflow_dispatch:
+    inputs:
+      range_start:
+        description: 'Start of search range'
+        required: false
+        default: '1011128158584751'
+      range_end:
+        description: 'End of search range'
+        required: false
+        default: '10098097238186292'
+      chunk_size:
+        description: 'Positions per parallel chunk (e.g. 2000000000000 = 2e12)'
+        required: false
+        default: '2000000000000'
+      max_chunks:
+        description: 'Max number of parallel chunks (<=256)'
+        required: false
+        default: '24'
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: gen
+        run: |
+          python3 - <<'PYEOF'
+          import json, os
+          L = int('${{ inputs.range_start }}'); R = int('${{ inputs.range_end }}')
+          cs = int('${{ inputs.chunk_size }}'); mc = int('${{ inputs.max_chunks }}')
+          total = R - L + 1
+          n = min(mc, (total + cs - 1)//cs)
+          chunks = []
+          for i in range(n):
+              s = L + i*cs
+              e = min(L + (i+1)*cs - 1, R)
+              chunks.append({"i": i, "s": str(s), "e": str(e)})
+          with open('matrix.json','w') as f: json.dump({"include": chunks}, f)
+          mj = json.dumps({'include': chunks})
+          print(f"nchunks={n}")
+          print(f"matrix={mj}")
+          # set step output for the matrix strategy
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write("matrix=" + mj + "\n")
+          PYEOF
+      - name: Report plan
+        run: |
+          echo "Range [${{ inputs.range_start }}, ${{ inputs.range_end }}]"
+          echo "chunk_size=${{ inputs.chunk_size }}, max_chunks=${{ inputs.max_chunks }}"
+
+  scan:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile
+        run: g++ -O3 -march=native -funroll-loops -pthread -o scan_range scan_range.cpp
+      - name: Scan chunk ${{ matrix.i }}
+        timeout-minutes: 350
+        run: |
+          timeout 345m ./scan_range "${{ matrix.s }}" "${{ matrix.e }}" 20000000 > chunk_${{ matrix.i }}.txt 2>&1
+          echo "exit=$?" >> chunk_${{ matrix.i }}.txt
+      - name: Summarize
+        run: |
+          if grep -q "FOUND N" chunk_${{ matrix.i }}.txt; then
+            echo "CHUNK_${{ matrix.i }} [${{ matrix.s }}, ${{ matrix.e }}]: SOLUTION FOUND"
+            grep "FOUND N" chunk_${{ matrix.i }}.txt
+          elif grep -q "NO SOLUTION" chunk_${{ matrix.i }}.txt; then
+            echo "CHUNK_${{ matrix.i }} [${{ matrix.s }}, ${{ matrix.e }}]: no solution"
+          else
+            echo "CHUNK_${{ matrix.i }} [${{ matrix.s }}, ${{ matrix.e }}]: TIMEOUT/partial"
+            tail -1 chunk_${{ matrix.i }}.txt
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chunk-${{ matrix.i }}
+          path: chunk_${{ matrix.i }}.txt
+
+  collect:
+    needs: scan
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Aggregate
+        run: |
+          mkdir -p results
+          : > results/summary.txt
+          sols=0
+          for f in artifacts/chunk-*/chunk_*.txt; do
+            cid=$(basename "$f" .txt)
+            if grep -q "FOUND N" "$f"; then
+              echo "$cid: SOLUTION -> $(grep 'FOUND N' "$f" | head -1)" >> results/summary.txt
+              sols=1
+            elif grep -q "NO SOLUTION" "$f"; then
+              echo "$cid: no-solution" >> results/summary.txt
+            else
+              echo "$cid: TIMEOUT/partial" >> results/summary.txt
+            fi
+          done
+          echo "ANY_SOLUTION=$sols" >> results/summary.txt
+          cat results/summary.txt
+      - name: Commit results
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git checkout -B results || true
+          git add results/summary.txt
+          git -c user.name="github-actions" -c user.email="actions@github.com" commit -m "scan results $(date -u +%Y%m%dT%H%M%SZ)" || echo "no changes"
+          git push -f origin results
