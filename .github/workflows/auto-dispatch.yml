@@ -1,0 +1,167 @@
+name: Auto Dispatch Wave
+
+# 每 4 小时自动派发下一波 prime-window 扫描
+# 状态管理：scan 分支的 wave_state.json（next_wave / next_start）
+# 触发扫描：更新 scan_config.json 后用 gh workflow run 触发 parallel-scan
+
+on:
+  schedule:
+    - cron: '0 */4 * * *'   # 每 4 小时（UTC 00/04/08/12/16/20 点）
+  workflow_dispatch:
+
+concurrency:
+  group: auto-dispatch-wave
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Checkout scan branch
+        uses: actions/checkout@v4
+        with:
+          ref: scan
+          fetch-depth: 1
+
+      # ---------- 读取进度状态 ----------
+      - name: Read wave state
+        id: state
+        run: |
+          if [ -f wave_state.json ]; then
+            NW=$(jq -r '.next_wave' wave_state.json)
+            NS=$(jq -r '.next_start' wave_state.json)
+          else
+            NW=1
+            NS=1011128158584751
+          fi
+          echo "next_wave=$NW" >> "$GITHUB_OUTPUT"
+          echo "next_start=$NS" >> "$GITHUB_OUTPUT"
+          echo "State: next_wave=$NW, next_start=$NS"
+
+      # ---------- 终止判断 ----------
+      - name: Check if all done
+        id: check
+        run: |
+          R=10098097238186292
+          NS="${{ steps.state.outputs.next_start }}"
+          if [ "$NS" -gt "$R" ]; then
+            echo "done=true" >> "$GITHUB_OUTPUT"
+            echo "All waves dispatched. Search complete."
+          else
+            echo "done=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ---------- 检查是否有正在运行的扫描 ----------
+      - name: Check running parallel-scan
+        if: steps.check.outputs.done == 'false'
+        id: running
+        continue-on-error: true
+        run: |
+          COUNT=$(gh run list --workflow=scan.yml --status=in_progress --limit=5 --json databaseId --jq 'length' 2>/dev/null || echo 0)
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Running parallel-scan jobs: $COUNT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Skip if scan already running
+        if: steps.check.outputs.done == 'false' && steps.running.outputs.count > 0
+        run: |
+          echo "A parallel-scan is still running (${{ steps.running.outputs.count }} job(s))."
+          echo "Skipping this dispatch to avoid runner queue overflow."
+          exit 0
+
+      # ---------- 安全检查：最新结果 ----------
+      - name: Safety check latest results
+        if: steps.check.outputs.done == 'false'
+        id: safety
+        continue-on-error: true
+        run: |
+          git fetch origin results --depth=1
+          LATEST=$(git ls-tree -d --name-only origin/results | sort | tail -1)
+          if [ -n "$LATEST" ]; then
+            SUM=$(git show "origin/results:$LATEST/summary.txt" 2>/dev/null || echo "")
+            if echo "$SUM" | grep -q "ANY_SOLUTION=1"; then
+              echo "found=true" >> "$GITHUB_OUTPUT"
+              echo "::warning::SOLUTION FOUND in $LATEST"
+            else
+              echo "found=false" >> "$GITHUB_OUTPUT"
+              echo "Latest $LATEST: ANY_SOLUTION=0"
+            fi
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Halt if solution found
+        if: steps.safety.outputs.found == 'true'
+        run: |
+          echo "A solution has been found in the results branch."
+          echo "Auto-dispatch halted. Please inspect results for the exact N."
+          exit 1
+
+      # ---------- 计算本波区间并更新配置 ----------
+      - name: Calculate wave and update config
+        if: steps.check.outputs.done == 'false'
+        id: calc
+        run: |
+          W=${{ steps.state.outputs.next_wave }}
+          S=${{ steps.state.outputs.next_start }}
+          R=10098097238186292
+          CS=6000000000000
+          MC=24
+          COVER=$((CS * MC))
+          E=$((S + COVER - 1))
+          [ "$E" -gt "$R" ] && E=$R
+          echo "wave=$W" >> "$GITHUB_OUTPUT"
+          echo "start=$S" >> "$GITHUB_OUTPUT"
+          echo "end=$E" >> "$GITHUB_OUTPUT"
+          echo "Wave $W: [$S, $E]"
+
+          # 更新 scan_config.json（parallel-scan 启动时读取）
+          jq -n --arg s "$S" --arg e "$R" --arg c "$CS" --argjson m "$MC" \
+            '{range_start:$s, range_end:$e, chunk_size:$c, max_chunks:$m}' \
+            > scan_config.json
+
+          # 推进 wave_state.json
+          jq -n --argjson w "$((W+1))" --argjson s "$((E+1))" \
+            '{next_wave:$w, next_start:$s}' \
+            > wave_state.json
+
+          echo "--- scan_config.json ---"
+          cat scan_config.json
+          echo "--- wave_state.json ---"
+          cat wave_state.json
+
+      # ---------- 提交推送 ----------
+      - name: Commit and push to scan
+        if: steps.check.outputs.done == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add scan_config.json wave_state.json
+          git commit -m "Wave ${{ steps.calc.outputs.wave }}: cover [${{ steps.calc.outputs.start }}, ${{ steps.calc.outputs.end }}]"
+          git push origin scan
+
+      # ---------- 触发 parallel-scan ----------
+      # 注意：GITHUB_TOKEN 的 push 不会自动触发 workflow，所以用 gh CLI 显式触发
+      - name: Trigger parallel-scan workflow
+        if: steps.check.outputs.done == 'false'
+        run: |
+          sleep 3
+          gh workflow run scan.yml --ref scan
+          echo "Triggered parallel-scan (scan.yml) on ref=scan for Wave ${{ steps.calc.outputs.wave }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          if [ "${{ steps.check.outputs.done }}" = "true" ]; then
+            echo "## All waves dispatched - search complete"
+            echo "No further dispatch needed."
+          else
+            echo "## Wave ${{ steps.calc.outputs.wave }} dispatched"
+            echo "- Range: [${{ steps.calc.outputs.start }}, ${{ steps.calc.outputs.end }}]"
+            echo "- Next wave: $(( ${{ steps.calc.outputs.wave }} + 1 ))"
+          fi
