@@ -1,0 +1,25 @@
+chunk_0: no-solution
+chunk_1: no-solution
+chunk_10: no-solution
+chunk_11: no-solution
+chunk_12: no-solution
+chunk_13: no-solution
+chunk_14: no-solution
+chunk_15: no-solution
+chunk_16: no-solution
+chunk_17: no-solution
+chunk_18: no-solution
+chunk_19: no-solution
+chunk_2: no-solution
+chunk_20: no-solution
+chunk_21: no-solution
+chunk_22: no-solution
+chunk_23: no-solution
+chunk_3: no-solution
+chunk_4: no-solution
+chunk_5: no-solution
+chunk_6: no-solution
+chunk_7: no-solution
+chunk_8: no-solution
+chunk_9: no-solution
+ANY_SOLUTION=0
