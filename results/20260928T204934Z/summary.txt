@@ -1,0 +1,12 @@
+chunk_0: no-solution
+chunk_1: no-solution
+chunk_10: SOLUTION -> FOUND N = 10098097238186292
+chunk_2: no-solution
+chunk_3: no-solution
+chunk_4: no-solution
+chunk_5: no-solution
+chunk_6: no-solution
+chunk_7: no-solution
+chunk_8: no-solution
+chunk_9: no-solution
+ANY_SOLUTION=1
